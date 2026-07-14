@@ -145,11 +145,11 @@ impl IqosBle {
             .await
             .map_err(|error| Error::Transport(error.to_string()))?;
 
-        // Arm the notification stream before writing. IQOS often responds
-        // immediately, so subscribing after the write races with the response.
-        self.send(command).await?;
-
         timeout(SCP_RESPONSE_TIMEOUT, async {
+            // Arm the notification stream before writing. IQOS often responds
+            // immediately, so subscribing after the write races with the response.
+            self.send(command).await?;
+
             loop {
                 let notification = notifications.next().await.ok_or_else(|| {
                     Error::Transport("BLE notification stream ended before an SCP response".into())

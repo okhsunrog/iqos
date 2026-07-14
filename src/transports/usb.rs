@@ -168,13 +168,12 @@ impl IqosUsb {
         // Poll IN first and keep a transfer armed while OUT is pending. IQOS
         // may NAK an OUT report until it has room to publish the response; the
         // operating-system HID driver also keeps an IN transfer active.
-        let (response, write_result) = tokio::join!(
+        let (response, ()) = tokio::try_join!(
             biased;
             read_matching_response(reader, command, deadline),
             write_reports(writer, &reports, deadline),
-        );
-        write_result?;
-        response
+        )?;
+        Ok(response)
     }
 }
 
@@ -334,6 +333,10 @@ impl SegmentCollector {
         let raw_id = report[2];
         let is_initial = raw_id & 0x80 != 0;
         let segment_id = raw_id & 0x7f;
+
+        if !is_initial && self.next_id.is_none() {
+            return Ok(None);
+        }
 
         if is_initial {
             self.data.clear();
@@ -505,6 +508,35 @@ mod tests {
             response = collector.push(&report).unwrap().or(response);
         }
         assert_eq!(response.unwrap(), command);
+    }
+
+    #[test]
+    fn ignores_stray_continuation_without_changing_collector_state() {
+        let mut report = [0_u8; REPORT_SIZE];
+        report[..5].copy_from_slice(&[SEGMENTED_REPORT_ID, 0x03, 0x01, 0xaa, 0xbb]);
+        let mut collector = SegmentCollector::default();
+
+        assert!(collector.push(&report).unwrap().is_none());
+        assert!(collector.data.is_empty());
+        assert_eq!(collector.next_id, None);
+    }
+
+    #[test]
+    fn rejects_mismatched_continuation_while_collecting_segments() {
+        let mut initial = [0_u8; REPORT_SIZE];
+        initial[..5].copy_from_slice(&[SEGMENTED_REPORT_ID, 0x03, 0x82, 0xaa, 0xbb]);
+        let mut mismatched = [0_u8; REPORT_SIZE];
+        mismatched[..5].copy_from_slice(&[SEGMENTED_REPORT_ID, 0x03, 0x00, 0xcc, 0xdd]);
+        let mut collector = SegmentCollector::default();
+
+        assert!(collector.push(&initial).unwrap().is_none());
+        let error = collector.push(&mismatched).unwrap_err();
+
+        assert!(
+            matches!(error, Error::ProtocolDecode(message) if message.contains("unexpected USB segment id 0"))
+        );
+        assert_eq!(collector.data, [0xaa, 0xbb]);
+        assert_eq!(collector.next_id, Some(1));
     }
 
     #[test]

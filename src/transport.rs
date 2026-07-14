@@ -25,6 +25,10 @@ pub trait Transport: Send + Sync {
     /// Send a command that expects a single response frame.
     async fn request(&self, command: &[u8]) -> Result<Vec<u8>>;
 
-    /// Send a command that does not require an immediate response frame.
+    /// Send a command without returning a response frame.
+    ///
+    /// Completion means the backend has finished any synchronization required
+    /// by its wire protocol. A backend may therefore wait for and discard a
+    /// matching device response even though no payload is returned.
     async fn send(&self, command: &[u8]) -> Result<()>;
 }

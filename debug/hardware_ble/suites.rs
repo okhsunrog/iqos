@@ -85,8 +85,14 @@ pub(crate) async fn snapshot(session: &IqosBle, iqos: &Iqos<IqosBle>) -> TestRes
 
     if std::env::var_os("IQOS_TEST_TRACE_DIAGNOSIS").is_some() {
         for command in ALL_DIAGNOSIS_COMMANDS {
-            let response = session.request(command).await?;
-            println!("  Diagnosis raw: tx={} rx={}", hex(command), hex(&response));
+            match session.request(command).await {
+                Ok(response) => {
+                    println!("  Diagnosis raw: tx={} rx={}", hex(command), hex(&response));
+                }
+                Err(error) => {
+                    println!("  Diagnosis raw: tx={} (read failed: {error})", hex(command));
+                }
+            }
         }
     }
 
