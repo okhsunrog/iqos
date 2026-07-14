@@ -35,9 +35,7 @@ impl ProductNumberKind {
 
 /// Parse a product-number response into a printable ASCII string.
 ///
-/// The legacy CLI slices stick responses as bytes `4..len - 1`, treating the
-/// final byte as a trailing checksum/status byte. Holder responses are sliced
-/// from byte 4 to the end.
+/// The final byte is the SCP CRC and is excluded for both targets.
 ///
 /// # Errors
 ///
@@ -57,24 +55,12 @@ pub fn product_number_from_response(bytes: &[u8], kind: ProductNumberKind) -> Re
         ));
     }
 
-    let payload = match kind {
-        ProductNumberKind::Stick => {
-            if bytes.len() <= prefix.len() + 1 {
-                return Err(Error::ProtocolDecode(
-                    "invalid product number response: missing stick payload".to_string(),
-                ));
-            }
-            &bytes[prefix.len()..bytes.len() - 1]
-        }
-        ProductNumberKind::Holder => {
-            if bytes.len() <= prefix.len() {
-                return Err(Error::ProtocolDecode(
-                    "invalid product number response: missing holder payload".to_string(),
-                ));
-            }
-            &bytes[prefix.len()..]
-        }
-    };
+    if bytes.len() <= prefix.len() + 1 {
+        return Err(Error::ProtocolDecode(
+            "invalid product number response: missing payload".to_string(),
+        ));
+    }
+    let payload = &bytes[prefix.len()..bytes.len() - 1];
 
     Ok(payload
         .iter()
@@ -100,8 +86,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_holder_product_number_to_end_of_frame() {
-        let bytes = [&[0x00, 0x08, 0x88, 0x03][..], b"HOLDER123456"].concat();
+    fn parses_holder_product_number_without_trailing_crc() {
+        let bytes = [&[0x00, 0x08, 0x88, 0x03][..], b"HOLDER123456", &[0xA5]].concat();
 
         let product_number = product_number_from_response(&bytes, ProductNumberKind::Holder)
             .expect("holder product number should parse");
@@ -112,7 +98,7 @@ mod tests {
     #[test]
     fn replaces_non_printable_payload_bytes_with_dots() {
         let product_number = product_number_from_response(
-            &[0x00, 0x08, 0x88, 0x03, b'A', 0x00, 0xFF],
+            &[0x00, 0x08, 0x88, 0x03, b'A', 0x00, 0xFF, 0xA5],
             ProductNumberKind::Holder,
         )
         .expect("holder product number should parse");
