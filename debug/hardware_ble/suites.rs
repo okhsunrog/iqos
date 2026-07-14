@@ -1,4 +1,6 @@
+use iqos::protocol::ALL_DIAGNOSIS_COMMANDS;
 use iqos::{DeviceCapability, DeviceStatus, Iqos, IqosBle};
+use std::fmt::Write as _;
 
 use crate::{TestResult, exercises};
 
@@ -72,7 +74,42 @@ pub(crate) async fn snapshot(session: &IqosBle, iqos: &Iqos<IqosBle>) -> TestRes
         }
     }
 
+    if model.supports(DeviceCapability::AutoStart) {
+        match iqos.read_autostart(model).await {
+            Ok(enabled) => {
+                println!("  AutoStart: {}", if enabled { "enabled" } else { "disabled" })
+            }
+            Err(e) => println!("  AutoStart: (read failed: {e})"),
+        }
+    }
+
+    if std::env::var_os("IQOS_TEST_TRACE_DIAGNOSIS").is_some() {
+        for command in ALL_DIAGNOSIS_COMMANDS {
+            let response = session.request(command).await?;
+            println!("  Diagnosis raw: tx={} rx={}", hex(command), hex(&response));
+        }
+    }
+
+    match iqos.read_diagnosis().await {
+        Ok(data) => println!(
+            "  Diagnosis: puffs={:?} days={:?} battery={:?}",
+            data.total_smoking_count, data.days_used, data.battery_voltage
+        ),
+        Err(e) => println!("  Diagnosis: (read failed: {e})"),
+    }
+
     Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut result = String::with_capacity(bytes.len().saturating_mul(3));
+    for (index, byte) in bytes.iter().enumerate() {
+        if index > 0 {
+            result.push(' ');
+        }
+        write!(result, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    result
 }
 
 pub(crate) async fn exercise_all(
