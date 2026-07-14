@@ -1,18 +1,19 @@
 //! # iqos
 //!
-//! Rust library for controlling IQOS devices over BLE, exposing diagnostic
-//! telemetry and device controls not available through the official IQOS app.
+//! Async Rust library for controlling IQOS devices over BLE or USB, exposing
+//! diagnostic telemetry and device controls not available through the official
+//! IQOS app.
 //!
 //! ## Layers
 //!
 //! 1. [`protocol`] — command builders, response parsers, and typed domain values
-//! 2. [`transport`] — transport contract shared by BLE and future USB backends
-//! 3. [`transports`] — backend implementations (BLE via btleplug, USB reserved)
+//! 2. [`transport`] — transport contract shared by BLE and USB backends
+//! 3. [`transports`] — backend implementations
 //!
 //! ## Features
 //!
 //! - `btleplug-support`: enables the BLE backend via btleplug
-//! - `usb-support`: reserved for future USB transport (not yet implemented)
+//! - `usb-support`: enables the USB HID backend via `nusb`
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
@@ -22,6 +23,9 @@
 /// BLE-specific IQOS session and metadata logic.
 #[cfg(feature = "btleplug-support")]
 pub mod ble;
+/// Runtime-selectable BLE/USB transport.
+#[cfg(any(feature = "btleplug-support", feature = "usb-support"))]
+pub mod connection;
 /// Error types and the crate-wide `Result` alias.
 pub mod error;
 /// Protocol-layer command, response, and domain types.
@@ -41,6 +45,10 @@ pub use transport::{Transport, TransportKind};
 
 #[cfg(feature = "btleplug-support")]
 pub use ble::IqosBle;
+#[cfg(any(feature = "btleplug-support", feature = "usb-support"))]
+pub use connection::IqosTransport;
+#[cfg(feature = "usb-support")]
+pub use transports::usb::IqosUsb;
 
 /// Library facade placeholder for future extracted IQOS session/device API.
 ///

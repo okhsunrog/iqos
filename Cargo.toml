@@ -16,6 +16,7 @@ include = [
     "Cargo.toml",
     "LICENSE",
     "README.md",
+    "debug/**",
     "src/**",
 ]
 
@@ -33,10 +34,15 @@ name = "autostart"
 path = "debug/autostart.rs"
 required-features = ["btleplug-support"]
 
+[[bin]]
+name = "hardware_usb"
+path = "debug/hardware_usb.rs"
+required-features = ["usb-support"]
+
 [features]
 default = []
 btleplug-support = ["dep:btleplug", "dep:tokio"]
-usb-support = []
+usb-support = ["dep:nusb", "dep:tokio"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [] }
@@ -45,6 +51,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [] }
 async-trait = "0.1"
 btleplug = { version = "0.11.8", optional = true }
 futures = "0.3"
+nusb = { version = "0.2.4", features = ["tokio"], optional = true }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"], optional = true }
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "sync", "time"], optional = true }
 uuid = { version = "1", features = ["macro-diagnostics"] }
