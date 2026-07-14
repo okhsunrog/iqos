@@ -10,6 +10,8 @@ mod flexpuff;
 mod gesture;
 mod lock;
 mod product;
+#[cfg(any(feature = "btleplug-support", feature = "usb-support"))]
+pub(crate) mod scp;
 mod status;
 mod types;
 mod vibration;

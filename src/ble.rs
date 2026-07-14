@@ -5,10 +5,13 @@
 //! loading, characteristic discovery, and the low-level request/response path
 //! built around the SCP control characteristic.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use btleplug::api::{Characteristic, Peripheral as _, WriteType};
 use btleplug::platform::Peripheral;
 use futures::StreamExt;
+use tokio::time::timeout;
 
 use crate::{
     Error, Result,
@@ -16,10 +19,12 @@ use crate::{
         BATTERY_CHARACTERISTIC_UUID, DEVICE_INFO_SERVICE_UUID, DeviceInfo, DeviceModel,
         MANUFACTURER_NAME_CHAR_UUID_PREFIX, MODEL_NUMBER_CHAR_UUID_PREFIX,
         SCP_CONTROL_CHARACTERISTIC_UUID, SERIAL_NUMBER_CHAR_UUID_PREFIX,
-        SOFTWARE_REVISION_CHAR_UUID_PREFIX,
+        SOFTWARE_REVISION_CHAR_UUID_PREFIX, scp,
     },
     transport::{Transport, TransportKind},
 };
+
+const SCP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// BLE session around a connected IQOS peripheral.
 #[derive(Debug, Clone)]
@@ -130,18 +135,38 @@ impl IqosBle {
     /// Returns an error if the write fails, notifications cannot be opened, or
     /// no response frame arrives.
     pub async fn request(&self, command: &[u8]) -> Result<Vec<u8>> {
-        self.send(command).await?;
+        if let Some(error) = scp::checksum_error(command) {
+            return Err(Error::ProtocolEncode(error));
+        }
+
         let mut notifications = self
             .peripheral
             .notifications()
             .await
             .map_err(|error| Error::Transport(error.to_string()))?;
 
-        notifications
-            .next()
-            .await
-            .map(|notification| notification.value)
-            .ok_or_else(|| Error::Transport("no BLE response notification received".to_string()))
+        // Arm the notification stream before writing. IQOS often responds
+        // immediately, so subscribing after the write races with the response.
+        self.send(command).await?;
+
+        timeout(SCP_RESPONSE_TIMEOUT, async {
+            loop {
+                let notification = notifications.next().await.ok_or_else(|| {
+                    Error::Transport("BLE notification stream ended before an SCP response".into())
+                })?;
+                if notification.uuid != self.scp_control_characteristic.uuid
+                    || !scp::headers_match(command, &notification.value)
+                {
+                    continue;
+                }
+                if let Some(error) = scp::checksum_error(&notification.value) {
+                    return Err(Error::ProtocolDecode(error));
+                }
+                return Ok(notification.value);
+            }
+        })
+        .await
+        .map_err(|_| Error::Transport("timed out waiting for BLE SCP response".to_string()))?
     }
 }
 
