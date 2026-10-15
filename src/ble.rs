@@ -271,7 +271,7 @@ async fn load_device_info(peripheral: &Peripheral) -> Result<DeviceInfo> {
             .read(characteristic)
             .await
             .map_err(|error| Error::Transport(error.to_string()))?;
-        let value = String::from_utf8_lossy(&value).to_string();
+        let value = device_info_text(&value);
 
         match prefix {
             MODEL_NUMBER_CHAR_UUID_PREFIX => info.model_number = Some(value),
@@ -283,6 +283,10 @@ async fn load_device_info(peripheral: &Peripheral) -> Result<DeviceInfo> {
     }
 
     Ok(info)
+}
+
+fn device_info_text(value: &[u8]) -> String {
+    String::from_utf8_lossy(value).trim_end_matches('\0').to_owned()
 }
 
 fn find_characteristic(peripheral: &Peripheral, target_uuid: uuid::Uuid) -> Result<Characteristic> {
@@ -297,6 +301,16 @@ fn find_characteristic(peripheral: &Peripheral, target_uuid: uuid::Uuid) -> Resu
 #[cfg(test)]
 mod tests {
     use crate::protocol::DeviceModel;
+
+    #[test]
+    fn nul_terminated_gatt_serial_enables_model_scoped_measurements() {
+        let serial = super::device_info_text(b"0033006A000000000000\0");
+        assert_eq!(crate::protocol::identify_serial(&serial).unwrap().native_type, 0x82);
+        assert_eq!(crate::protocol::measurement_commands(&serial).len(), 4);
+        // Embedded NULs still indicate malformed identity data.
+        let invalid = super::device_info_text(b"0033006A\0000000000000\0");
+        assert!(crate::protocol::identify_serial(&invalid).is_none());
+    }
 
     #[test]
     fn classifies_iluma_i_prime_before_generic_matches() {
