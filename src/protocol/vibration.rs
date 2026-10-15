@@ -179,7 +179,7 @@ impl VibrationSettings {
         } else if bytes == WHEN_CHARGE_START_OFF_RESPONSE {
             Ok(false)
         } else {
-            Ok(bytes[8] == 0x01)
+            Err(Error::ProtocolDecode("unknown charge-start vibration response".into()))
         }
     }
 
@@ -259,7 +259,17 @@ impl VibrationSettings {
             };
 
             if charge_start_enabled || !all_core_settings_disabled(self) {
-                commands.extend(extra_commands.iter().map(|command| command.to_vec()));
+                // Old reference sequences contain BLE fragments, not complete
+                // SCP requests. Normalize before passing them to either backend.
+                let mut assembler = super::scp::BleFrameAssembler::default();
+                for fragment in extra_commands {
+                    if let Some(frame) = assembler.push(fragment).map_err(Error::ProtocolEncode)? {
+                        if let Some(error) = super::scp::checksum_error(&frame) {
+                            return Err(Error::ProtocolEncode(error));
+                        }
+                        commands.push(frame);
+                    }
+                }
             }
         }
 
@@ -411,7 +421,13 @@ mod tests {
 
         let expected: Vec<Vec<u8>> =
             std::iter::once(vec![0x00, 0xC9, 0x44, 0x23, 0x10, 0x00, 0x01, 0x00, 0x62])
-                .chain(WHEN_CHARGING_START_ON_COMMANDS.iter().map(|command| command.to_vec()))
+                .chain({
+                    let mut assembler = super::super::scp::BleFrameAssembler::default();
+                    WHEN_CHARGING_START_ON_COMMANDS
+                        .iter()
+                        .filter_map(|fragment| assembler.push(fragment).unwrap())
+                        .collect::<Vec<_>>()
+                })
                 .collect();
 
         assert_eq!(commands, expected);

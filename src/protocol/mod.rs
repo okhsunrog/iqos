@@ -3,6 +3,8 @@
 
 mod ble;
 mod brightness;
+/// Transport-independent API for language bindings.
+pub mod client;
 mod diagnosis;
 mod firmware;
 mod flexbattery;
@@ -10,7 +12,6 @@ mod flexpuff;
 mod gesture;
 mod lock;
 mod product;
-#[cfg(any(feature = "btleplug-support", feature = "usb-support"))]
 pub(crate) mod scp;
 mod status;
 mod types;
@@ -28,8 +29,8 @@ pub use ble::{
 pub use brightness::{BrightnessLevel, LOAD_BRIGHTNESS_COMMAND};
 pub(crate) use diagnosis::DiagnosticDataBuilder;
 pub use diagnosis::{
-    ALL_DIAGNOSIS_COMMANDS, DiagnosticData, LOAD_BATTERY_VOLTAGE_COMMAND, LOAD_TELEMETRY_COMMAND,
-    LOAD_TIMESTAMP_COMMAND,
+    ALL_DIAGNOSIS_COMMANDS, DiagnosticData, LOAD_BATTERY_VOLTAGE_COMMAND, LOAD_LIFE_DATA_COMMAND,
+    LOAD_TELEMETRY_COMMAND, LOAD_TIMESTAMP_COMMAND,
 };
 pub use firmware::{
     FirmwareKind, FirmwareVersion, LOAD_HOLDER_FIRMWARE_VERSION_COMMAND,

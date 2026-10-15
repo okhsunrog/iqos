@@ -137,6 +137,12 @@ pub fn pausemode_from_response(bytes: &[u8]) -> Result<bool> {
         ));
     }
 
+    if bytes[4] != 0x02 {
+        return Err(Error::ProtocolDecode(
+            "invalid Pause Mode response: setting ID mismatch".into(),
+        ));
+    }
+
     match bytes[5] {
         0x00 => Ok(false),
         0x01 => Ok(true),

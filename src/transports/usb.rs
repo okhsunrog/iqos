@@ -224,7 +224,9 @@ async fn read_matching_response(
         };
 
         if scp::headers_match(command, &response) {
-            validate_crc(&response)?;
+            if let Some(error) = scp::response_error(&response) {
+                return Err(Error::ProtocolDecode(error));
+            }
             return Ok(response);
         }
     }
@@ -364,10 +366,6 @@ impl SegmentCollector {
     }
 }
 
-fn validate_crc(frame: &[u8]) -> Result<()> {
-    scp::checksum_error(frame).map_or(Ok(()), |error| Err(Error::ProtocolDecode(error)))
-}
-
 fn validate_outbound_crc(frame: &[u8]) -> Result<()> {
     scp::checksum_error(frame).map_or(Ok(()), |error| Err(Error::ProtocolEncode(error)))
 }
@@ -441,25 +439,15 @@ mod tests {
 
     #[test]
     fn decodes_atomic_report_back_to_ble_shape() {
+        let frame =
+            [0, 0xc0, 0x88, 0x21, 0xb0, 0x1d, 0x29, 0, 0xac, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0x94];
         let mut report = [0_u8; REPORT_SIZE];
-        report[..10].copy_from_slice(&[
-            ATOMIC_REPORT_ID,
-            0x08,
-            0xc0,
-            0x88,
-            0x21,
-            0x00,
-            0x00,
-            0x10,
-            0x68,
-            0x00,
-        ]);
-        let crc = scp::crc8(&report[3..9]);
-        report[9] = crc;
-
+        report[0] = ATOMIC_REPORT_ID;
+        report[1] = 18;
+        report[2..20].copy_from_slice(&frame[1..]);
         let response = decode_atomic_report(&report).unwrap().unwrap();
-
-        assert_eq!(response, [0x00, 0xc0, 0x88, 0x21, 0x00, 0x00, 0x10, 0x68, crc]);
+        assert_eq!(response, frame);
+        assert!(scp::response_error(&response).is_none());
     }
 
     #[test]
@@ -490,10 +478,9 @@ mod tests {
 
     #[test]
     fn segments_and_reassembles_long_scp_frame() {
-        let mut command = vec![0x00, 0xc0, 0x44, 0x02];
+        let mut command = vec![0x00, 0xc0, 0x10, 122, 1, 1];
         command.extend(0_u8..=119);
-        let checksum = scp::crc8(&command[2..]);
-        command.push(checksum);
+        command.extend_from_slice(&[0xca, 0x05]);
 
         let reports = encode_reports(&command).unwrap();
         assert_eq!(reports.len(), 3);

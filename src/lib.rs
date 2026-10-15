@@ -1,8 +1,7 @@
 //! # iqos
 //!
 //! Async Rust library for controlling IQOS devices over BLE or USB, exposing
-//! diagnostic telemetry and device controls not available through the official
-//! IQOS app.
+//! validated raw diagnostic telemetry and device controls.
 //!
 //! ## Layers
 //!
@@ -289,6 +288,11 @@ impl<T: Transport> Iqos<T> {
         let mut builder = protocol::DiagnosticDataBuilder::default();
         for command in protocol::ALL_DIAGNOSIS_COMMANDS {
             let response = self.transport.request(command).await?;
+            if !protocol::scp::headers_match(command, &response) {
+                return Err(Error::ProtocolDecode(
+                    "diagnostic response does not match request".into(),
+                ));
+            }
             builder = builder.parse(&response)?;
         }
         Ok(builder.build())
@@ -380,38 +384,25 @@ impl<T: Transport> Iqos<T> {
         Ok(())
     }
 
-    /// Read the current battery voltage via the SCP diagnostic command.
-    ///
-    /// Returns the raw cell voltage in volts (e.g. `4.2`). This uses the
-    /// request/response path and is suitable for on-demand refreshes after the
-    /// BLE session is established.
-    ///
-    /// For the initial connection snapshot (battery percentage via GATT direct
-    /// read), use [`IqosBle::read_battery_level`](crate::ble::IqosBle::read_battery_level).
+    /// Battery voltage conversion is not verified for the supported models.
     ///
     /// # Errors
-    ///
-    /// Returns an error if the transport request fails, the response cannot be
-    /// decoded, or the battery voltage field is absent from the frame.
+    /// Always returns [`Error::Unsupported`], without sending the old LifeData
+    /// query that was incorrectly interpreted as millivolts.
     pub async fn read_battery_voltage(&self) -> Result<f32> {
-        let response = self.transport.request(&protocol::LOAD_BATTERY_VOLTAGE_COMMAND).await?;
-        protocol::DiagnosticDataBuilder::default()
-            .parse(&response)?
-            .build()
-            .battery_voltage
-            .ok_or_else(|| {
-                Error::ProtocolDecode("battery voltage not present in response".to_string())
-            })
+        Err(Error::Unsupported(
+            "battery voltage conversion is not verified; command 0x084 reads LifeData".into(),
+        ))
     }
 
     /// Read a device status snapshot combining GATT metadata and SCP firmware reads.
     ///
     /// The caller supplies `model` and `device_info` — both already available on the BLE session
     /// after `connect_and_discover`. This method then performs the SCP reads (stick firmware,
-    /// holder firmware for holder-capable models, battery voltage).
+    /// holder firmware for holder-capable models).
     ///
-    /// Firmware reads are fatal — they propagate errors. Battery voltage transport failures
-    /// yield `None`; protocol decode errors still propagate.
+    /// Firmware and product reads propagate errors. Battery voltage remains `None`
+    /// until a model-specific conversion has been verified; no voltage query is sent.
     ///
     /// # Errors
     ///
@@ -431,11 +422,7 @@ impl<T: Transport> Iqos<T> {
         } else {
             (None, None)
         };
-        let battery_voltage = match self.read_battery_voltage().await {
-            Ok(voltage) => Some(voltage),
-            Err(Error::Transport(_)) => None,
-            Err(error) => return Err(error),
-        };
+        let battery_voltage = None;
         Ok(DeviceStatus {
             model,
             device_info,
@@ -742,7 +729,12 @@ mod tests {
             iqos.transport().recorded_requests().as_slice(),
             &[protocol::LOAD_VIBRATE_CHARGE_START_COMMAND.to_vec()],
         );
-        assert_eq!(iqos.transport().recorded_sends().len(), 8);
+        let sends = iqos.transport().recorded_sends();
+        assert_eq!(sends.len(), 6); // Complete SCP frames, before BLE fragmentation.
+        assert_eq!(sends.iter().map(Vec::len).collect::<Vec<_>>(), [9, 29, 29, 9, 9, 9]);
+        for frame in sends.iter() {
+            protocol::client::validate(frame, false).unwrap();
+        }
     }
 
     #[test]
@@ -960,29 +952,9 @@ mod tests {
     }
 
     #[test]
-    fn read_diagnosis_sends_all_commands_and_accumulates_responses() {
-        // Four responses: telemetry(skipped-bad marker), timestamp, telemetry(skipped), battery
-        let transport = MockTransport::with_responses([
-            // Unknown header — should be silently skipped
-            Ok(vec![0x00, 0x08, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00]),
-            // Timestamp: days_used = 20 (0x0014)
-            Ok(vec![0x00, 0x08, 0x80, 0x02, 0x14, 0x00, 0x00, 0x00]),
-            // Unknown header — should be silently skipped
-            Ok(vec![0x00, 0x08, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00]),
-            // Battery: 4200 mV (0x1068)
-            Ok(vec![0x00, 0x08, 0x88, 0x21, 0x00, 0x68, 0x10, 0x00, 0x00]),
-        ]);
-        let iqos = Iqos::new(transport);
-
-        let data = block_on(iqos.read_diagnosis()).expect("diagnosis should succeed");
-
-        assert_eq!(data.days_used, Some(20));
-        assert_eq!(data.battery_voltage, Some(4200_f32 / 1000.0));
-        assert_eq!(data.total_smoking_count, None);
-        assert_eq!(
-            iqos.transport().recorded_requests().len(),
-            protocol::ALL_DIAGNOSIS_COMMANDS.len(),
-        );
+    fn read_diagnosis_rejects_invalid_transport_response() {
+        let iqos = Iqos::new(MockTransport::with_responses([Ok(vec![0, 8, 0x90, 0x22])]));
+        assert!(matches!(block_on(iqos.read_diagnosis()), Err(Error::ProtocolDecode(_))));
     }
 
     #[test]
@@ -1152,21 +1124,10 @@ mod tests {
     }
 
     #[test]
-    fn read_battery_voltage_parses_response() {
-        // battery voltage frame: header [0x88, 0x21] at bytes[2..4], raw mV at bytes[5..7]
-        // 0xA8=168, 0x10=16 → LE u16 = 0x10A8 = 4264 → 4.264 V
-        let transport = MockTransport::with_responses([Ok(vec![
-            0x00, 0x08, 0x88, 0x21, 0x00, 0xA8, 0x10, 0x00, 0x00,
-        ])]);
-        let iqos = Iqos::new(transport);
-
-        let voltage = block_on(iqos.read_battery_voltage()).expect("voltage should parse");
-
-        assert!((voltage - 4264_f32 / 1000.0).abs() < f32::EPSILON);
-        assert_eq!(
-            iqos.transport().recorded_requests().as_slice(),
-            &[protocol::LOAD_BATTERY_VOLTAGE_COMMAND.to_vec()],
-        );
+    fn read_battery_voltage_is_unsupported_without_device_io() {
+        let iqos = Iqos::new(MockTransport::with_responses([]));
+        assert!(matches!(block_on(iqos.read_battery_voltage()), Err(Error::Unsupported(_))));
+        assert!(iqos.transport().recorded_requests().is_empty());
     }
 
     #[test]
@@ -1238,13 +1199,12 @@ mod tests {
         assert_eq!(status.product_number, "ONE123456");
         assert!(status.holder_product_number.is_none());
         assert!(status.holder_firmware.is_none());
-        assert!(status.battery_voltage.is_some());
+        assert!(status.battery_voltage.is_none());
         assert_eq!(
             iqos.transport().recorded_requests().as_slice(),
             &[
                 protocol::PRODUCT_NUMBER_COMMAND.to_vec(),
                 protocol::LOAD_STICK_FIRMWARE_VERSION_COMMAND.to_vec(),
-                protocol::LOAD_BATTERY_VOLTAGE_COMMAND.to_vec(),
             ],
         );
     }
@@ -1274,7 +1234,7 @@ mod tests {
         );
         assert_eq!(status.product_number, "STICK12345");
         assert_eq!(status.holder_product_number.as_deref(), Some("HOLDER12345"));
-        assert!(status.battery_voltage.is_some());
+        assert!(status.battery_voltage.is_none());
         assert_eq!(
             iqos.transport().recorded_requests().as_slice(),
             &[
@@ -1282,7 +1242,6 @@ mod tests {
                 protocol::LOAD_STICK_FIRMWARE_VERSION_COMMAND.to_vec(),
                 protocol::HOLDER_PRODUCT_NUMBER_COMMAND.to_vec(),
                 protocol::LOAD_HOLDER_FIRMWARE_VERSION_COMMAND.to_vec(),
-                protocol::LOAD_BATTERY_VOLTAGE_COMMAND.to_vec(),
             ],
         );
     }
@@ -1313,7 +1272,6 @@ mod tests {
                 protocol::LOAD_STICK_FIRMWARE_VERSION_COMMAND.to_vec(),
                 protocol::HOLDER_PRODUCT_NUMBER_COMMAND.to_vec(),
                 protocol::LOAD_HOLDER_FIRMWARE_VERSION_COMMAND.to_vec(),
-                protocol::LOAD_BATTERY_VOLTAGE_COMMAND.to_vec(),
             ],
         );
     }
@@ -1361,7 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn read_device_status_propagates_battery_decode_errors() {
+    fn read_device_status_does_not_send_the_false_voltage_query() {
         let transport = MockTransport::with_responses([
             Ok([&[0x00, 0xC0, 0x88, 0x03][..], b"ONE123456", &[0xAA]].concat()),
             Ok(vec![0x00, 0xC0, 0x88, 0x00, 0x00, 0x00, 0x02, 0x05, 0x07, 0x18]),
@@ -1369,10 +1327,11 @@ mod tests {
         ]);
         let iqos = Iqos::new(transport);
 
-        let error = block_on(iqos.read_device_status(DeviceModel::IlumaOne, DeviceInfo::default()))
-            .expect_err("battery decode error should surface");
-
-        assert!(matches!(error, Error::ProtocolDecode(_)));
+        let status =
+            block_on(iqos.read_device_status(DeviceModel::IlumaOne, DeviceInfo::default()))
+                .unwrap();
+        assert!(status.battery_voltage.is_none());
+        assert_eq!(iqos.transport().recorded_requests().len(), 2);
     }
 
     #[test]

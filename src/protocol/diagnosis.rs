@@ -1,265 +1,155 @@
+use super::scp;
 use crate::{Error, Result};
 
-/// Command used to request telemetry data (puff count, days used).
+/// Read the raw extended 0x0101 records; their physical meaning is unverified.
 pub const LOAD_TELEMETRY_COMMAND: [u8; 8] = [0x00, 0xC9, 0x10, 0x02, 0x01, 0x01, 0x75, 0xD6];
-
-/// Command used to request timestamp data (days used).
+/// Read the raw extended device-time payload (not days of use).
 pub const LOAD_TIMESTAMP_COMMAND: [u8; 8] = [0x00, 0xC0, 0x10, 0x02, 0x00, 0x04, 0x38, 0xEF];
-
-/// Command used to request battery voltage.
-pub const LOAD_BATTERY_VOLTAGE_COMMAND: [u8; 5] = [0x00, 0xC0, 0x00, 0x21, 0xE7];
-
-/// All commands sent during a full diagnostic read, in order.
-///
-/// The telemetry command is sent twice to match the reference implementation's
-/// observed sequence.
+/// Read classic command 0x084 (model-specific LifeData).
+pub const LOAD_LIFE_DATA_COMMAND: [u8; 5] = [0x00, 0xC0, 0x00, 0x21, 0xE7];
+/// Compatibility alias. This command reads LifeData, NOT battery voltage.
+pub const LOAD_BATTERY_VOLTAGE_COMMAND: [u8; 5] = LOAD_LIFE_DATA_COMMAND;
+/// Diagnostic reads, retaining the established sequence.
 pub const ALL_DIAGNOSIS_COMMANDS: [&[u8]; 4] = [
     &LOAD_TELEMETRY_COMMAND,
     &LOAD_TIMESTAMP_COMMAND,
     &LOAD_TELEMETRY_COMMAND,
-    &LOAD_BATTERY_VOLTAGE_COMMAND,
+    &LOAD_LIFE_DATA_COMMAND,
 ];
 
-// Response header discriminants at bytes[2..4].
-const TELEMETRY_HEADER: [u8; 2] = [0x90, 0x22];
-const TIMESTAMP_HEADER: [u8; 2] = [0x80, 0x02];
-const BATTERY_VOLTAGE_HEADER: [u8; 2] = [0x88, 0x21];
-
-// Tag identifiers within 8-byte telemetry blocks.
-const TAG_PUFF_COUNT: u8 = 0x8E;
-const TAG_DAY_COUNTER: u8 = 0x17;
-
-/// Diagnostic telemetry data collected from the device.
-///
-/// All fields are optional because each is sourced from a separate response
-/// frame. Fields remain `None` if the corresponding frame could not be parsed.
+/// Validated diagnostic data without guessed units or counter meanings.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct DiagnosticData {
-    /// Total puff (smoking) count.
+    /// Uninterpreted 8-byte records from extended identifier 0x0101.
+    pub telemetry_records: Vec<[u8; 8]>,
+    /// Raw 8-byte device-time payload, kept separate from usage statistics.
+    pub device_time_raw: Option<[u8; 8]>,
+    /// Raw model-specific LifeData payload, without fabricated voltage units.
+    pub life_data_raw: Option<[u8; 14]>,
+    /// Compatibility field: always None until the counter's meaning is verified.
     pub total_smoking_count: Option<u16>,
-    /// Number of days the device has been used.
+    /// Compatibility field: always None; the device clock is not days used.
     pub days_used: Option<u16>,
-    /// Current battery voltage in volts.
+    /// Compatibility field: always None until model-specific conversion is verified.
     pub battery_voltage: Option<f32>,
 }
 
 impl DiagnosticData {
-    /// Create an empty `DiagnosticData`.
+    /// Create empty diagnostic data.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-/// An 8-byte block parsed from a telemetry response frame.
-struct TelemetryBlock {
-    value: u16,
-    tag: u8,
-}
-
-impl TelemetryBlock {
-    const SIZE: usize = 8;
-
-    fn parse(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < Self::SIZE {
-            return Err(Error::ProtocolDecode("invalid telemetry block: too short".to_string()));
-        }
-        Ok(Self { value: u16::from_le_bytes([bytes[4], bytes[5]]), tag: bytes[7] })
-    }
-}
-
-/// Incrementally builds a [`DiagnosticData`] by parsing successive response
-/// frames.
-///
-/// Each call to [`parse`](Self::parse) auto-detects the response type from the
-/// header bytes and populates the corresponding fields.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct DiagnosticDataBuilder {
     inner: DiagnosticData,
 }
 
 impl DiagnosticDataBuilder {
-    /// Parse a single response frame and update internal state.
-    ///
-    /// Unknown headers are silently ignored so that unrecognised frames do not
-    /// abort the collection.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the frame is too short to extract a 2-byte header,
-    /// or if a recognised frame's payload cannot be decoded.
     pub fn parse(mut self, bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 4 {
-            return Err(Error::ProtocolDecode(
-                "diagnosis response too short for header".to_string(),
-            ));
+        if let Some(error) = scp::response_error(bytes) {
+            return Err(Error::ProtocolDecode(error));
         }
-
-        match [bytes[2], bytes[3]] {
-            TELEMETRY_HEADER => self.parse_telemetry(bytes)?,
-            TIMESTAMP_HEADER => self.parse_timestamp(bytes)?,
-            BATTERY_VOLTAGE_HEADER => self.parse_battery_voltage(bytes)?,
-            _ => {} // unknown frame — skip gracefully
-        }
-
-        Ok(self)
-    }
-
-    /// Finalise and return the accumulated [`DiagnosticData`].
-    #[must_use]
-    pub fn build(self) -> DiagnosticData {
-        self.inner
-    }
-
-    fn parse_telemetry(&mut self, bytes: &[u8]) -> Result<()> {
-        if bytes.len() < 6 {
-            return Err(Error::ProtocolDecode(
-                "invalid telemetry frame: too short for marker".to_string(),
-            ));
-        }
-
-        let marker = u16::from_le_bytes([bytes[4], bytes[5]]);
-        if marker != 0x0101 {
-            return Err(Error::ProtocolDecode("invalid telemetry frame: wrong marker".to_string()));
-        }
-
-        let length_byte = bytes[3] as usize;
-        let num_blocks = length_byte.saturating_sub(2) / TelemetryBlock::SIZE;
-        let blocks_start: usize = 6;
-        let required = blocks_start + num_blocks * TelemetryBlock::SIZE;
-
-        if bytes.len() < required {
-            return Err(Error::ProtocolDecode(format!(
-                "invalid telemetry frame: expected {required} bytes, got {}",
-                bytes.len()
-            )));
-        }
-
-        for i in 0..num_blocks {
-            let offset = blocks_start + i * TelemetryBlock::SIZE;
-            let block = TelemetryBlock::parse(&bytes[offset..offset + TelemetryBlock::SIZE])?;
-            match block.tag {
-                TAG_PUFF_COUNT => self.inner.total_smoking_count = Some(block.value),
-                TAG_DAY_COUNTER => self.inner.days_used = Some(block.value),
+        if scp::uses_crc16(bytes) {
+            if bytes.len() < 8 {
+                return Err(Error::ProtocolDecode("missing extended data identifier".into()));
+            }
+            let payload = &bytes[6..bytes.len() - 2];
+            match &bytes[4..6] {
+                [1, 1] => {
+                    if !payload.len().is_multiple_of(8) {
+                        return Err(Error::ProtocolDecode("partial telemetry record".into()));
+                    }
+                    self.inner.telemetry_records = payload
+                        .chunks_exact(8)
+                        .map(|record| record.try_into().expect("exact 8-byte chunk"))
+                        .collect();
+                }
+                [0, 4] => {
+                    self.inner.device_time_raw = Some(payload.try_into().map_err(|_| {
+                        Error::ProtocolDecode("unknown device-time payload length".into())
+                    })?);
+                }
                 _ => {}
             }
+        } else if (u16::from(bytes[2] & 3) | (u16::from(bytes[3]) << 2)) == 0x84 {
+            self.inner.life_data_raw =
+                Some(bytes[4..bytes.len() - 1].try_into().map_err(|_| {
+                    Error::ProtocolDecode("unknown LifeData payload length".into())
+                })?);
         }
-
-        Ok(())
+        Ok(self)
     }
-
-    fn parse_timestamp(&mut self, bytes: &[u8]) -> Result<()> {
-        if bytes.len() < 6 {
-            return Err(Error::ProtocolDecode("invalid timestamp frame: too short".to_string()));
-        }
-        self.inner.days_used = Some(u16::from_le_bytes([bytes[4], bytes[5]]));
-        Ok(())
-    }
-
-    fn parse_battery_voltage(&mut self, bytes: &[u8]) -> Result<()> {
-        if bytes.len() < 7 {
-            return Err(Error::ProtocolDecode(
-                "invalid battery voltage frame: too short".to_string(),
-            ));
-        }
-        let raw = u16::from_le_bytes([bytes[5], bytes[6]]);
-        self.inner.battery_voltage = Some(f32::from(raw) / 1000.0);
-        Ok(())
+    pub fn build(self) -> DiagnosticData {
+        self.inner
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ALL_DIAGNOSIS_COMMANDS, DiagnosticData, DiagnosticDataBuilder,
-        LOAD_BATTERY_VOLTAGE_COMMAND, LOAD_TELEMETRY_COMMAND, LOAD_TIMESTAMP_COMMAND,
-    };
+    use super::*;
+    const TELEMETRY: [u8; 40] = [
+        0, 8, 0x90, 0x22, 1, 1, 0, 0, 0, 0, 0x56, 0xb, 0, 0x8e, 1, 0, 0, 0, 0x57, 0xa, 0, 0x20, 2,
+        0, 0, 0, 0x11, 6, 0, 0x17, 3, 0, 0, 0, 0x24, 0, 0, 0x18, 0xed, 0xee,
+    ];
+    const TIME: [u8; 16] =
+        [0, 0xc0, 0x90, 0xa, 0, 4, 0xda, 7, 1, 1, 0xbd, 0xd1, 0x93, 0x1f, 0xd6, 0xa2];
+    const LIFE: [u8; 19] =
+        [0, 0xc0, 0x88, 0x21, 0xb0, 0x1d, 0x29, 0, 0xac, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0x94];
 
     #[test]
-    fn keeps_load_commands_stable() {
-        assert_eq!(LOAD_TELEMETRY_COMMAND, [0x00, 0xC9, 0x10, 0x02, 0x01, 0x01, 0x75, 0xD6]);
-        assert_eq!(LOAD_TIMESTAMP_COMMAND, [0x00, 0xC0, 0x10, 0x02, 0x00, 0x04, 0x38, 0xEF]);
-        assert_eq!(LOAD_BATTERY_VOLTAGE_COMMAND, [0x00, 0xC0, 0x00, 0x21, 0xE7]);
-    }
-
-    #[test]
-    fn diagnosis_commands_contains_four_entries() {
-        assert_eq!(ALL_DIAGNOSIS_COMMANDS.len(), 4);
-    }
-
-    #[test]
-    fn parses_captured_crc16_telemetry_frame() {
-        let bytes = [
-            0x00, 0x08, 0x90, 0x22, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x0d, 0x05, 0x00, 0x8e,
-            0x01, 0x00, 0x00, 0x00, 0x6c, 0x04, 0x00, 0x20, 0x02, 0x00, 0x00, 0x00, 0x32, 0x04,
-            0x00, 0x17, 0x03, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x18, 0xb2, 0x28,
-        ];
-
-        let result = DiagnosticDataBuilder::default().parse(&bytes).unwrap().build();
-
-        assert_eq!(result.total_smoking_count, Some(1293));
-        assert_eq!(result.days_used, Some(1074));
-    }
-
-    #[test]
-    fn parses_battery_voltage_frame() {
-        // header [0x88, 0x21] at bytes[2..4], raw voltage at bytes[5..7]
-        // 4200 mV = 4.2 V
-        let bytes = [0x00, 0x08, 0x88, 0x21, 0x00, 0xA8, 0x10, 0x00, 0x00];
-        let result = DiagnosticDataBuilder::default().parse(&bytes).unwrap().build();
-        // bytes[5] = 0xA8, bytes[6] = 0x10 → u16 LE = 0x10A8 = 4264
-        assert_eq!(result.battery_voltage, Some(4264_f32 / 1000.0));
-    }
-
-    #[test]
-    fn parses_timestamp_frame() {
-        // header [0x80, 0x02] at bytes[2..4], days at bytes[4..6]
-        let bytes = [0x00, 0x08, 0x80, 0x02, 0x1E, 0x00, 0x00, 0x00];
-        let result = DiagnosticDataBuilder::default().parse(&bytes).unwrap().build();
-        assert_eq!(result.days_used, Some(0x001E)); // 30 days
-    }
-
-    #[test]
-    fn ignores_unknown_header_frames() {
-        let bytes = [0x00, 0x08, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00];
-        let result = DiagnosticDataBuilder::default().parse(&bytes).unwrap().build();
-        assert_eq!(result, DiagnosticData::default());
-    }
-
-    #[test]
-    fn rejects_too_short_frame() {
-        let error = DiagnosticDataBuilder::default().parse(&[0x00, 0x08, 0x88]);
-        assert!(error.is_err());
-    }
-
-    #[test]
-    fn rejects_too_short_battery_voltage_frame() {
-        // header matches but not enough bytes for voltage
-        let bytes = [0x00, 0x08, 0x88, 0x21, 0x00, 0xA8];
-        let error = DiagnosticDataBuilder::default().parse(&bytes);
-        assert!(error.is_err());
-    }
-
-    #[test]
-    fn rejects_too_short_timestamp_frame() {
-        let bytes = [0x00, 0x08, 0x80, 0x02, 0x1E];
-        let error = DiagnosticDataBuilder::default().parse(&bytes);
-        assert!(error.is_err());
-    }
-
-    #[test]
-    fn builder_accumulates_across_multiple_frames() {
-        let timestamp_bytes = [0x00, 0x08, 0x80, 0x02, 0x0A, 0x00, 0x00, 0x00];
-        let battery_bytes = [0x00, 0x08, 0x88, 0x21, 0x00, 0xE8, 0x0F, 0x00, 0x00];
-        let result = DiagnosticDataBuilder::default()
-            .parse(&timestamp_bytes)
+    fn captured_diagnostics_preserve_bytes_without_inventing_units() {
+        let data = DiagnosticDataBuilder::default()
+            .parse(&TELEMETRY)
             .unwrap()
-            .parse(&battery_bytes)
+            .parse(&TIME)
+            .unwrap()
+            .parse(&TELEMETRY)
+            .unwrap()
+            .parse(&LIFE)
             .unwrap()
             .build();
-        assert_eq!(result.days_used, Some(10));
-        // bytes[5]=0xE8, bytes[6]=0x0F → 0x0FE8 = 4072
-        assert_eq!(result.battery_voltage, Some(4072_f32 / 1000.0));
-        assert_eq!(result.total_smoking_count, None);
+        assert_eq!(data.telemetry_records.len(), 4);
+        assert_eq!(data.telemetry_records[0], [0, 0, 0, 0, 0x56, 0xb, 0, 0x8e]);
+        assert_eq!(data.device_time_raw, Some([0xda, 7, 1, 1, 0xbd, 0xd1, 0x93, 0x1f]));
+        assert_eq!(data.life_data_raw.unwrap()[..4], [0xb0, 0x1d, 0x29, 0]);
+        assert_eq!(
+            (data.total_smoking_count, data.days_used, data.battery_voltage),
+            (None, None, None)
+        );
+    }
+    #[test]
+    fn rejects_every_truncated_capture_and_bad_crc() {
+        for frame in [&TELEMETRY[..], &TIME[..], &LIFE[..]] {
+            for length in 0..frame.len() {
+                assert!(DiagnosticDataBuilder::default().parse(&frame[..length]).is_err());
+            }
+            let mut damaged = frame.to_vec();
+            damaged[4] ^= 1;
+            assert!(DiagnosticDataBuilder::default().parse(&damaged).is_err());
+        }
+    }
+    #[test]
+    fn synthetic_legacy_voltage_and_days_are_not_accepted() {
+        for frame in
+            [&[0, 8, 0x88, 0x21, 0, 0x68, 0x10, 0, 0][..], &[0, 8, 0x80, 2, 30, 0, 0, 0][..]]
+        {
+            assert!(DiagnosticDataBuilder::default().parse(frame).is_err());
+        }
+    }
+    #[test]
+    fn valid_but_partial_telemetry_record_is_rejected() {
+        let mut frame = vec![0, 0xc0, 0x90, 3, 1, 1, 0xff];
+        let mut crc = 0_u16;
+        for byte in &frame[2..] {
+            crc ^= u16::from(*byte) << 8;
+            for _ in 0..8 {
+                crc = if crc & 0x8000 == 0 { crc << 1 } else { (crc << 1) ^ 0x755b };
+            }
+        }
+        frame.extend(crc.to_le_bytes());
+        assert!(DiagnosticDataBuilder::default().parse(&frame).is_err());
     }
 }

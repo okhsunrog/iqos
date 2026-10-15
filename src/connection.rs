@@ -49,8 +49,8 @@ impl IqosTransport {
 
     /// Return the BLE battery percentage when available.
     ///
-    /// USB exposes battery voltage through SCP but does not provide the direct
-    /// GATT percentage characteristic.
+    /// USB does not provide the direct GATT percentage characteristic.
+    /// A model-specific voltage conversion has not been verified.
     ///
     /// # Errors
     ///
@@ -61,10 +61,9 @@ impl IqosTransport {
             #[cfg(feature = "btleplug-support")]
             Self::Ble(transport) => transport.read_battery_level().await,
             #[cfg(feature = "usb-support")]
-            Self::Usb(_) => Err(Error::Unsupported(
-                "battery percentage is unavailable over USB; read battery voltage instead"
-                    .to_string(),
-            )),
+            Self::Usb(_) => {
+                Err(Error::Unsupported("battery percentage is unavailable over USB".to_string()))
+            }
         }
     }
 }

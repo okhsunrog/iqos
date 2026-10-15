@@ -3,11 +3,10 @@ use core::fmt;
 use crate::{Error, Result};
 
 /// Command used to request the firmware version for the stick/vape unit.
-pub const LOAD_STICK_FIRMWARE_VERSION_COMMAND: [u8; 7] = [0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00];
+pub const LOAD_STICK_FIRMWARE_VERSION_COMMAND: [u8; 5] = [0x00, 0xC0, 0x00, 0x00, 0x00];
 
 /// Command used to request the firmware version for the holder unit.
-pub const LOAD_HOLDER_FIRMWARE_VERSION_COMMAND: [u8; 7] =
-    [0x00, 0xC9, 0x00, 0x00, 0x00, 0x00, 0x00];
+pub const LOAD_HOLDER_FIRMWARE_VERSION_COMMAND: [u8; 5] = [0x00, 0xC9, 0x00, 0x00, 0x00];
 
 /// IQOS firmware target kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,10 +108,7 @@ mod tests {
 
     #[test]
     fn keeps_firmware_commands_stable() {
-        assert_eq!(LOAD_STICK_FIRMWARE_VERSION_COMMAND, [0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00]);
-        assert_eq!(
-            LOAD_HOLDER_FIRMWARE_VERSION_COMMAND,
-            [0x00, 0xC9, 0x00, 0x00, 0x00, 0x00, 0x00]
-        );
+        assert_eq!(LOAD_STICK_FIRMWARE_VERSION_COMMAND, [0x00, 0xC0, 0x00, 0x00, 0x00]);
+        assert_eq!(LOAD_HOLDER_FIRMWARE_VERSION_COMMAND, [0x00, 0xC9, 0x00, 0x00, 0x00]);
     }
 }

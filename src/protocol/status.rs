@@ -7,7 +7,7 @@ use crate::protocol::{DeviceInfo, DeviceModel, FirmwareVersion};
 /// [`DeviceModel::supports_holder_features`](crate::protocol::DeviceModel::supports_holder_features)
 /// returns `true`, holder product number and firmware fields are `Some`. For
 /// one-piece models they are `None`.
-/// `battery_voltage` is `None` when the SCP transport read fails.
+/// `battery_voltage` stays `None` until model-specific voltage conversion is verified.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceStatus {
     /// Detected device model.
@@ -26,6 +26,6 @@ pub struct DeviceStatus {
     /// [`DeviceModel::supports_holder_features`](crate::protocol::DeviceModel::supports_holder_features)
     /// returns `true`.
     pub holder_firmware: Option<FirmwareVersion>,
-    /// Battery cell voltage in volts (e.g. `4.2`), or `None` if the SCP transport read failed.
+    /// Compatibility field: currently `None`; no verified model-specific voltage conversion.
     pub battery_voltage: Option<f32>,
 }

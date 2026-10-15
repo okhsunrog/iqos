@@ -11,7 +11,7 @@ pub(crate) const UNLOCK_COMMAND_1: [u8; 9] = [0x00, 0xC9, 0x44, 0x04, 0x00, 0x00
 pub(crate) const UNLOCK_COMMAND_2: [u8; 5] = [0x00, 0xC9, 0x00, 0x04, 0x1C];
 
 /// Confirmation command sent after both lock and unlock sequences.
-pub(crate) const CONFIRMATION_COMMAND: [u8; 5] = [0x00, 0xC0, 0x01, 0x00, 0xF6];
+pub(crate) const CONFIRMATION_COMMAND: [u8; 5] = [0x00, 0xC0, 0x01, 0x00, 0x15];
 
 /// Return the three-command lock sequence.
 #[must_use]
@@ -46,7 +46,7 @@ mod tests {
 
     #[test]
     fn keeps_confirmation_command_stable() {
-        assert_eq!(CONFIRMATION_COMMAND, [0x00, 0xC0, 0x01, 0x00, 0xF6]);
+        assert_eq!(CONFIRMATION_COMMAND, [0x00, 0xC0, 0x01, 0x00, 0x15]);
     }
 
     #[test]

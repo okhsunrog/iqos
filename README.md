@@ -3,7 +3,7 @@
 [![CI](https://github.com/V-VX/iqos/actions/workflows/ci.yml/badge.svg)](https://github.com/V-VX/iqos/actions/workflows/ci.yml)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
-Async Rust library for controlling IQOS devices over BLE or USB, exposing device internals not accessible through the official IQOS app.
+Async Rust library for controlling IQOS devices over BLE or USB, with shared command builders and validated response decoding.
 
 > **Early development.** The public API is still taking shape and should be considered unstable.
 
@@ -11,15 +11,15 @@ Async Rust library for controlling IQOS devices over BLE or USB, exposing device
 
 ## What This Exposes
 
-The official IQOS app surfaces only basic status and settings. This library goes further.
+The library exposes the following reverse-engineered fields and device controls. Unverified field meanings remain raw.
 
-### Diagnostic telemetry — not available in the official app
+### Raw diagnostic telemetry
 
 | Field | Description |
 |---|---|
-| Total puff count | Lifetime usage counter |
-| Days used | How long the device has been in service |
-| Battery voltage | Raw cell voltage, not just a percentage |
+| Raw telemetry records | Validated 8-byte records; counter semantics unverified |
+| Raw device time | Separate payload; not days of use |
+| Raw LifeData | Model-specific payload; voltage conversion unverified |
 
 ### Programmatic device control
 
@@ -42,9 +42,13 @@ Both transports carry the same SCP application messages. USB adds 64-byte HID fr
 
 Ordinary SCP messages use CRC-8 (`0x07`). Length-delimited data messages with opcode `0x10`/`0x90`, including diagnosis telemetry, use CRC-16/OPENSAFETY-B (`0x755b`) stored little-endian. Checksum validation and request/response matching are shared by BLE and USB.
 
-USB discovery, device metadata, serial number, product numbers, firmware versions, battery voltage, brightness, vibration settings, FlexPuff, FlexBattery, AutoStart, and diagnosis reads have been validated on an IQOS ILUMA i and compared with BLE results from the same device. Stateful commands are not yet hardware-validated over USB.
+USB discovery, device metadata, serial number, product numbers, firmware versions, brightness, vibration settings, FlexPuff, FlexBattery, AutoStart, and diagnosis reads have been validated on an IQOS ILUMA i and compared with BLE results from the same device. Stateful commands are not yet hardware-validated over USB. Earlier voltage/counter interpretations were incorrect: command 0x084 is LifeData. `read_battery_voltage` now returns Unsupported without I/O; legacy diagnostic fields remain None.
 
 ---
+
+## Shared clients
+
+The sibling CLI and Slint applications depend directly on this crate. Flutter uses `protocol::client` through a thin FRB v2 adapter and keeps BLE in flutter_blue_plus. Future Kotlin bindings will use UniFFI. No copied parser should be added to a client.
 
 ## Architecture
 

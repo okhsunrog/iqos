@@ -5,13 +5,19 @@
 //! loading, characteristic discovery, and the low-level request/response path
 //! built around the SCP control characteristic.
 
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+use tokio::{sync::Mutex, time::timeout};
 
 use async_trait::async_trait;
 use btleplug::api::{Characteristic, Peripheral as _, WriteType};
 use btleplug::platform::Peripheral;
 use futures::StreamExt;
-use tokio::time::timeout;
 
 use crate::{
     Error, Result,
@@ -24,8 +30,6 @@ use crate::{
     transport::{Transport, TransportKind},
 };
 
-const SCP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// BLE session around a connected IQOS peripheral.
 #[derive(Debug, Clone)]
 pub struct IqosBle {
@@ -34,6 +38,8 @@ pub struct IqosBle {
     scp_control_characteristic: Characteristic,
     model: DeviceModel,
     device_info: DeviceInfo,
+    request_lock: Arc<Mutex<()>>,
+    invalid: Arc<AtomicBool>,
 }
 
 impl IqosBle {
@@ -45,6 +51,26 @@ impl IqosBle {
     /// Returns an error if connection, service discovery, subscription, or
     /// metadata loading fails.
     pub async fn connect_and_discover(peripheral: Peripheral) -> Result<Self> {
+        Self::connect_with_model_hint(peripheral, None).await
+    }
+
+    /// Connect using a saved local name when the platform has no cached advertisement.
+    /// The GATT setup sequence is identical to `connect_and_discover`.
+    ///
+    /// # Errors
+    /// Returns an error if connection, discovery, subscription or metadata reading fails.
+    pub async fn connect_and_discover_with_name(
+        peripheral: Peripheral,
+        local_name: &str,
+    ) -> Result<Self> {
+        Self::connect_with_model_hint(peripheral, Some(DeviceModel::from_local_name(local_name)))
+            .await
+    }
+
+    async fn connect_with_model_hint(
+        peripheral: Peripheral,
+        hint: Option<DeviceModel>,
+    ) -> Result<Self> {
         if !peripheral.is_connected().await.map_err(|error| Error::Transport(error.to_string()))? {
             peripheral.connect().await.map_err(|error| Error::Transport(error.to_string()))?;
         }
@@ -57,7 +83,20 @@ impl IqosBle {
         let battery_characteristic = find_characteristic(&peripheral, BATTERY_CHARACTERISTIC_UUID)?;
         let scp_control_characteristic =
             find_characteristic(&peripheral, SCP_CONTROL_CHARACTERISTIC_UUID)?;
-        let model = detect_model(&peripheral).await?;
+        let model = match peripheral
+            .properties()
+            .await
+            .map_err(|error| Error::Transport(error.to_string()))?
+        {
+            Some(properties) => properties
+                .local_name
+                .as_deref()
+                .map(DeviceModel::from_local_name)
+                .filter(|model| *model != DeviceModel::Unknown)
+                .or(hint)
+                .unwrap_or(DeviceModel::Unknown),
+            None => hint.ok_or_else(|| Error::Transport("missing BLE properties".to_string()))?,
+        };
         let device_info = load_device_info(&peripheral).await?;
 
         peripheral
@@ -71,6 +110,8 @@ impl IqosBle {
             scp_control_characteristic,
             model,
             device_info,
+            request_lock: Arc::new(Mutex::new(())),
+            invalid: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -92,9 +133,8 @@ impl IqosBle {
     /// Use this during initial connection setup, alongside serial number and
     /// firmware version, to obtain a battery snapshot without an SCP round-trip.
     ///
-    /// For on-demand refreshes after the session is established, use
-    /// [`Iqos::read_battery_voltage`](crate::Iqos::read_battery_voltage) instead,
-    /// which uses the SCP request/response path.
+    /// This same read can be used for later percentage refreshes. It is not
+    /// a cell-voltage measurement.
     ///
     /// # Errors
     ///
@@ -107,13 +147,7 @@ impl IqosBle {
             .await
             .map_err(|error| Error::Transport(error.to_string()))?;
 
-        if frame.len() < 3 {
-            return Err(Error::ProtocolDecode(
-                "battery characteristic frame too short to extract level".to_string(),
-            ));
-        }
-
-        Ok(frame[2])
+        crate::protocol::client::battery(&frame)
     }
 
     /// Send a command over the SCP control characteristic.
@@ -122,10 +156,17 @@ impl IqosBle {
     ///
     /// Returns an error if the BLE write fails.
     pub async fn send(&self, command: &[u8]) -> Result<()> {
-        self.peripheral
-            .write(&self.scp_control_characteristic, command, WriteType::WithResponse)
-            .await
-            .map_err(|error| Error::Transport(error.to_string()))
+        self.request(command).await.map(|_| ())
+    }
+
+    async fn write_command(&self, command: &[u8]) -> Result<()> {
+        for chunk in crate::protocol::client::fragments(command)? {
+            self.peripheral
+                .write(&self.scp_control_characteristic, &chunk, WriteType::WithResponse)
+                .await
+                .map_err(|error| Error::Transport(error.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Send a command and wait for the next notification frame.
@@ -138,35 +179,61 @@ impl IqosBle {
         if let Some(error) = scp::checksum_error(command) {
             return Err(Error::ProtocolEncode(error));
         }
-
+        let _lock = self.request_lock.lock().await;
+        if self.invalid.load(Ordering::Acquire) {
+            return Err(Error::Transport("SCP session invalid; reconnect the device".into()));
+        }
         let mut notifications = self
             .peripheral
             .notifications()
             .await
             .map_err(|error| Error::Transport(error.to_string()))?;
-
-        timeout(SCP_RESPONSE_TIMEOUT, async {
-            // Arm the notification stream before writing. IQOS often responds
-            // immediately, so subscribing after the write races with the response.
-            self.send(command).await?;
-
+        // A dropped/timed-out transaction must not leave a late reply available
+        // to another clone of this session.
+        let mut transaction = TransactionGuard { invalid: &self.invalid, complete: false };
+        let result = timeout(Duration::from_secs(5), async {
+            self.write_command(command).await?;
+            let mut assembler = scp::BleFrameAssembler::default();
             loop {
-                let notification = notifications.next().await.ok_or_else(|| {
-                    Error::Transport("BLE notification stream ended before an SCP response".into())
-                })?;
-                if notification.uuid != self.scp_control_characteristic.uuid
-                    || !scp::headers_match(command, &notification.value)
-                {
+                let notification = notifications
+                    .next()
+                    .await
+                    .ok_or_else(|| Error::Transport("BLE notification stream ended".into()))?;
+                if notification.uuid != self.scp_control_characteristic.uuid {
                     continue;
                 }
-                if let Some(error) = scp::checksum_error(&notification.value) {
+                let Some(frame) =
+                    assembler.push(&notification.value).map_err(Error::ProtocolDecode)?
+                else {
+                    continue;
+                };
+                if !scp::headers_match(command, &frame) {
+                    continue;
+                }
+                if let Some(error) = scp::response_error(&frame) {
                     return Err(Error::ProtocolDecode(error));
                 }
-                return Ok(notification.value);
+                return Ok(frame);
             }
         })
         .await
-        .map_err(|_| Error::Transport("timed out waiting for BLE SCP response".to_string()))?
+        .map_err(|_| {
+            Error::Transport("timed out waiting for BLE SCP response; reconnect".into())
+        })?;
+        transaction.complete = result.is_ok();
+        result
+    }
+}
+
+struct TransactionGuard<'a> {
+    invalid: &'a AtomicBool,
+    complete: bool,
+}
+impl Drop for TransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.invalid.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -181,18 +248,8 @@ impl Transport for IqosBle {
     }
 
     async fn send(&self, command: &[u8]) -> Result<()> {
-        Self::send(self, command).await
+        Self::request(self, command).await.map(|_| ())
     }
-}
-
-async fn detect_model(peripheral: &Peripheral) -> Result<DeviceModel> {
-    let properties = peripheral
-        .properties()
-        .await
-        .map_err(|error| Error::Transport(error.to_string()))?
-        .ok_or_else(|| Error::Transport("missing BLE properties".to_string()))?;
-
-    Ok(properties.local_name.as_deref().map_or(DeviceModel::Unknown, DeviceModel::from_local_name))
 }
 
 async fn load_device_info(peripheral: &Peripheral) -> Result<DeviceInfo> {
