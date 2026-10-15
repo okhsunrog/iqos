@@ -53,5 +53,6 @@ btleplug = { version = "0.11.8", optional = true }
 futures = "0.3"
 nusb = { version = "0.2.4", features = ["tokio"], optional = true }
 thiserror = "2"
+time = { version = "0.3.55", features = ["formatting"] }
 tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "sync", "time"], optional = true }
 uuid = { version = "1", features = ["macro-diagnostics"] }

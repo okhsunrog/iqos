@@ -60,6 +60,22 @@ pub struct Iqos<T: Transport> {
 }
 
 impl<T: Transport> Iqos<T> {
+    /// Read optional model-scoped battery/clock measurements using the observed serial family.
+    /// Unknown families produce an empty snapshot without sending unverified requests.
+    ///
+    /// # Errors
+    /// Returns transport, checksum, identity or model-specific layout errors.
+    pub async fn read_measurements(&self, serial: &str) -> Result<protocol::Measurements> {
+        let mut frames = Vec::new();
+        for command in protocol::measurement_commands(serial) {
+            let response = self.transport.request(&command).await?;
+            if !protocol::client::matches(&command, &response) {
+                return Err(Error::ProtocolDecode("measurement response identity mismatch".into()));
+            }
+            frames.push(response);
+        }
+        protocol::measurements(serial, &frames)
+    }
     /// Create a new IQOS library facade around a transport implementation.
     #[must_use]
     pub const fn new(transport: T) -> Self {

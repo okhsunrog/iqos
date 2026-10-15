@@ -127,7 +127,7 @@ impl IqosBle {
         &self.device_info
     }
 
-    /// Read the battery level directly from the GATT Battery Service characteristic.
+    /// Read the battery level from the vendor-specific IQOS GATT characteristic.
     ///
     /// Returns a value in the range 0–100 representing the charge percentage.
     /// Use this during initial connection setup, alongside serial number and

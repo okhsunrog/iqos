@@ -19,7 +19,21 @@ The library exposes the following reverse-engineered fields and device controls.
 |---|---|
 | Raw telemetry records | Validated 8-byte records; counter semantics unverified |
 | Raw device time | Separate payload; not days of use |
-| Raw LifeData | Model-specific payload; voltage conversion unverified |
+| Raw LifeData | Model-specific payload; counter meanings and units unverified |
+
+### Model-scoped battery and clock measurements
+
+`Iqos::read_measurements(serial)` reads the verified **P1_41M** plan: conversion
+factor (0x80), charger battery (0x81), epoch (0x03) and extended device time.
+Other serial families produce no new requests. `protocol::client` exposes the
+same plan and decoder to Flutter/UniFFI; clients must not copy the byte layouts.
+
+`Measurements` retains raw voltage, device-specific factor, charge percentage,
+temperature byte, calendar epoch and interpreted device clock. Voltage is an
+explicit **estimate** and temperature's Celsius scaling remains provisional.
+The device clock has no established timezone. Missing/zero calibration does
+not produce an estimated voltage. The legacy verified-voltage API stays
+unsupported; these estimates do not populate its compatibility fields.
 
 ### Programmatic device control
 

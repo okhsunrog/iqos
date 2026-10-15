@@ -1,5 +1,6 @@
 //! Transport-independent entry points for foreign-language clients.
 //! All wire knowledge stays here or in the typed protocol modules.
+pub use super::measurements::{measurement_commands, measurements};
 use super::*;
 use crate::{Error, Result};
 

@@ -11,6 +11,7 @@ mod flexbattery;
 mod flexpuff;
 mod gesture;
 mod lock;
+mod measurements;
 mod product;
 pub(crate) mod scp;
 mod status;
@@ -45,6 +46,10 @@ pub use gesture::{
     LOAD_AUTOSTART_COMMAND, autostart_command, autostart_from_response, smartgesture_command,
 };
 pub use lock::{lock_commands, unlock_commands};
+pub use measurements::{
+    LOAD_CHARGER_BATTERY_COMMAND, LOAD_CONVERSION_COMMAND, LOAD_EPOCH_COMMAND, Measurements,
+    SerialIdentity, identify_serial, measurement_commands, measurements,
+};
 pub use product::{
     HOLDER_PRODUCT_NUMBER_COMMAND, PRODUCT_NUMBER_COMMAND, ProductNumberKind,
     product_number_from_response,
