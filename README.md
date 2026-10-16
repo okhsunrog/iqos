@@ -31,8 +31,9 @@ Other serial families produce no new requests. `protocol::client` exposes the
 same plan and decoder to Flutter/UniFFI; clients must not copy the byte layouts.
 
 `Measurements` retains raw voltage, device-specific factor, charge percentage,
-temperature byte, calendar epoch and interpreted device clock. Voltage is an
-explicit **estimate** and temperature's Celsius scaling remains provisional.
+temperature in degrees Celsius, calendar epoch and interpreted device clock.
+Voltage is an explicit **estimate**. Temperature is currently interpreted directly
+as Celsius; a conversion can be added if further evidence requires it.
 The device clock has no established timezone. Missing/zero calibration does
 not produce an estimated voltage. The legacy verified-voltage API stays
 unsupported; these estimates do not populate its compatibility fields.

@@ -52,8 +52,8 @@ pub struct Measurements {
     pub voltage_factor: Option<u16>,
     /// Charge percentage; independently compared with vendor GATT on `P1_41M`.
     pub charge_percent: Option<u8>,
-    /// SDK `batteryTemperature` byte; Celsius interpretation remains provisional.
-    pub temperature_raw: Option<u8>,
+    /// Battery temperature in degrees Celsius; currently interpreted directly from the SDK byte.
+    pub temperature_celsius: Option<u8>,
     /// Candidate volts using the official web estimator's conversion.
     pub estimated_voltage: Option<f32>,
     /// Calendar epoch as YYYY-MM-DD.
@@ -157,7 +157,7 @@ pub fn measurements(serial: &str, frames: &[Vec<u8>]) -> Result<Measurements> {
                     }
                     out.voltage_raw = Some(u16::from_le_bytes([payload[0], payload[1]]));
                     out.charge_percent = Some(payload[2]);
-                    out.temperature_raw = Some(payload[3]);
+                    out.temperature_celsius = Some(payload[3]);
                 }
                 3 => {
                     epoch = Some(date(payload)?);
@@ -200,7 +200,7 @@ mod tests {
         let m = measurements(SERIAL, &frames()).unwrap();
         assert_eq!(m.family.as_deref(), Some("P1_41M"));
         assert_eq!(m.charge_percent, Some(65));
-        assert_eq!(m.temperature_raw, Some(39));
+        assert_eq!(m.temperature_celsius, Some(39));
         assert_eq!(m.voltage_raw, Some(510));
         assert_eq!(m.voltage_factor, Some(523));
         assert!((m.estimated_voltage.unwrap() - 4.077_759).abs() < 0.000_01);
