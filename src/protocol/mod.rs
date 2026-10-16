@@ -10,6 +10,7 @@ mod firmware;
 mod flexbattery;
 mod flexpuff;
 mod gesture;
+mod holder;
 mod lock;
 mod measurements;
 mod product;
@@ -44,6 +45,10 @@ pub use flexbattery::{
 pub use flexpuff::{FlexPuffSetting, LOAD_FLEXPUFF_COMMAND};
 pub use gesture::{
     LOAD_AUTOSTART_COMMAND, autostart_command, autostart_from_response, smartgesture_command,
+};
+pub use holder::{
+    HolderSnapshot, LOAD_CHARGER_STATUS_COMMAND, LOAD_HOLDER_CELL_COMMAND, holder_data_commands,
+    holder_snapshot, holder_status_command,
 };
 pub use lock::{lock_commands, unlock_commands};
 pub use measurements::{

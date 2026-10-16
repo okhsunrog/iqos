@@ -60,6 +60,23 @@ pub struct Iqos<T: Transport> {
 }
 
 impl<T: Transport> Iqos<T> {
+    /// Read fresh holder availability, then only permitted cell/counter data.
+    /// Untested serial families send no new commands and retain legacy behavior.
+    ///
+    /// # Errors
+    /// Propagates transport failures and rejects corrupt or mismatched responses.
+    pub async fn read_holder_snapshot(&self, serial: &str) -> Result<protocol::HolderSnapshot> {
+        let status = if let Some(command) = protocol::holder_status_command(serial) {
+            Some(self.transport.request(&command).await?)
+        } else {
+            None
+        };
+        let mut frames = Vec::new();
+        for command in protocol::holder_data_commands(serial, status.as_deref())? {
+            frames.push(self.transport.request(&command).await?);
+        }
+        protocol::holder_snapshot(serial, status.as_deref(), &frames)
+    }
     /// Read optional model-scoped battery/clock measurements using the observed serial family.
     /// Unknown families produce an empty snapshot without sending unverified requests.
     ///
@@ -301,8 +318,26 @@ impl<T: Transport> Iqos<T> {
     /// Returns an error if any transport request fails, or if a response frame
     /// that matches a known header cannot be decoded.
     pub async fn read_diagnosis(&self) -> Result<DiagnosticData> {
+        self.read_diagnosis_available(true).await
+    }
+
+    /// Read charger diagnostics while skipping holder routes rejected by preflight.
+    ///
+    /// # Errors
+    /// Propagates transport, checksum and response identity failures.
+    pub async fn read_diagnosis_with_holder(
+        &self,
+        holder: &protocol::HolderSnapshot,
+    ) -> Result<DiagnosticData> {
+        self.read_diagnosis_available(holder.can_query_holder).await
+    }
+
+    async fn read_diagnosis_available(&self, query_holder: bool) -> Result<DiagnosticData> {
         let mut builder = protocol::DiagnosticDataBuilder::default();
         for command in protocol::ALL_DIAGNOSIS_COMMANDS {
+            if !query_holder && (command[1] >> 3) & 7 != 0 {
+                continue;
+            }
             let response = self.transport.request(command).await?;
             if !protocol::scp::headers_match(command, &response) {
                 return Err(Error::ProtocolDecode(
@@ -428,16 +463,39 @@ impl<T: Transport> Iqos<T> {
         model: DeviceModel,
         device_info: DeviceInfo,
     ) -> Result<DeviceStatus> {
+        self.read_device_status_available(model, device_info, true).await
+    }
+
+    /// Read metadata/firmware while skipping unavailable holder components.
+    ///
+    /// # Errors
+    /// Propagates transport and response decoding failures.
+    pub async fn read_device_status_with_holder(
+        &self,
+        model: DeviceModel,
+        device_info: DeviceInfo,
+        holder: &protocol::HolderSnapshot,
+    ) -> Result<DeviceStatus> {
+        self.read_device_status_available(model, device_info, holder.can_query_holder).await
+    }
+
+    async fn read_device_status_available(
+        &self,
+        model: DeviceModel,
+        device_info: DeviceInfo,
+        query_holder: bool,
+    ) -> Result<DeviceStatus> {
         let product_number = self.read_product_number(ProductNumberKind::Stick).await?;
         let stick_firmware = self.read_firmware_version(FirmwareKind::Stick).await?;
-        let (holder_product_number, holder_firmware) = if model.supports_holder_features() {
-            (
-                Some(self.read_product_number(ProductNumberKind::Holder).await?),
-                Some(self.read_firmware_version(FirmwareKind::Holder).await?),
-            )
-        } else {
-            (None, None)
-        };
+        let (holder_product_number, holder_firmware) =
+            if model.supports_holder_features() && query_holder {
+                (
+                    Some(self.read_product_number(ProductNumberKind::Holder).await?),
+                    Some(self.read_firmware_version(FirmwareKind::Holder).await?),
+                )
+            } else {
+                (None, None)
+            };
         let battery_voltage = None;
         Ok(DeviceStatus {
             model,
@@ -512,6 +570,44 @@ mod tests {
     use futures::executor::block_on;
 
     use super::*;
+
+    #[test]
+    fn unavailable_holder_skips_routes_and_fresh_preflight_restores_them() {
+        let out = vec![0, 0xc0, 0x85, 0x21, 0, 0x30, 0, 0, 0x86];
+        let time = vec![0, 0xc0, 0x90, 0x0a, 0, 4, 0xda, 7, 1, 1, 0xfe, 0x1b, 0x94, 0x1f, 0xbf, 1];
+        let life =
+            vec![0, 0xc0, 0x88, 0x21, 0xf7, 0x70, 0x29, 0, 0xb1, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0xa9];
+        let inside = vec![0, 0xc0, 0x85, 0x21, 0, 3, 0, 0, 0xda];
+        let cell = vec![0, 8, 0x85, 0x24, 0x25, 0x64, 0x7a, 0, 0x44];
+        let records = vec![
+            0, 8, 0x90, 0x22, 1, 1, 0, 0, 0, 0, 0x5f, 0x0b, 0, 0x8e, 1, 0, 0, 0, 0x5c, 0x0a, 0,
+            0x20, 2, 0, 0, 0, 0x15, 6, 0, 0x17, 3, 0, 0, 0, 0x29, 0, 0, 0x18, 0x53, 0xa0,
+        ];
+        let iqos = Iqos::new(MockTransport::with_responses(
+            [out, time, life, inside, cell, records].into_iter().map(Ok),
+        ));
+        let serial = "0033006A000000000000";
+        let unavailable = block_on(iqos.read_holder_snapshot(serial)).unwrap();
+        assert!(!unavailable.can_query_holder);
+        let data = block_on(iqos.read_diagnosis_with_holder(&unavailable)).unwrap();
+        assert!(data.telemetry_records.is_empty());
+        assert!(data.device_time_raw.is_some() && data.life_data_raw.is_some());
+        let available = block_on(iqos.read_holder_snapshot(serial)).unwrap();
+        assert!(available.can_query_holder);
+        assert_eq!(available.charge_percent, Some(37));
+        assert_eq!(available.experimental_use_count, Some(2911));
+        assert_eq!(
+            iqos.transport().recorded_requests().as_slice(),
+            &[
+                protocol::LOAD_CHARGER_STATUS_COMMAND.to_vec(),
+                protocol::LOAD_TIMESTAMP_COMMAND.to_vec(),
+                protocol::LOAD_LIFE_DATA_COMMAND.to_vec(),
+                protocol::LOAD_CHARGER_STATUS_COMMAND.to_vec(),
+                protocol::LOAD_HOLDER_CELL_COMMAND.to_vec(),
+                protocol::LOAD_TELEMETRY_COMMAND.to_vec(),
+            ]
+        );
+    }
 
     #[derive(Debug)]
     struct MockTransport {

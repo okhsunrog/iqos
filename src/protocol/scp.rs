@@ -157,7 +157,7 @@ pub(crate) fn crc8(bytes: &[u8]) -> u8 {
     })
 }
 
-fn crc16_opensafety_b(bytes: &[u8]) -> u16 {
+pub(crate) fn crc16_opensafety_b(bytes: &[u8]) -> u16 {
     bytes.iter().fold(0_u16, |mut crc, byte| {
         crc ^= u16::from(*byte) << 8;
         for _ in 0..8 {
