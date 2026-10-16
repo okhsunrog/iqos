@@ -5,6 +5,8 @@
 
 Async Rust library for controlling IQOS devices over BLE or USB, with shared command builders and validated response decoding.
 
+The [consolidated protocol reference](../research/PROTOCOL.md) describes all recovered formats, model-specific evidence, controlled experiments and remaining hypotheses. It also distinguishes research findings from APIs already implemented in this crate.
+
 > **Early development.** The public API is still taking shape and should be considered unstable.
 
 ---
@@ -62,7 +64,7 @@ USB discovery, device metadata, serial number, product numbers, firmware version
 
 ## Shared clients
 
-The sibling CLI and Slint applications depend directly on this crate. Flutter uses `protocol::client` through a thin FRB v2 adapter and keeps BLE in flutter_blue_plus. Future Kotlin bindings will use UniFFI. No copied parser should be added to a client.
+The sibling CLI and Slint applications depend directly on this crate. Flutter uses `protocol::client` through a thin FRB v2 adapter and keeps BLE in flutter_blue_plus. Kotlin phone and Wear clients use UniFFI and Android BluetoothGatt. No copied parser should be added to a client.
 
 ## Architecture
 
@@ -108,7 +110,7 @@ cargo test --all-targets --all-features
 
 ## Local Hardware Debug
 
-The repository includes a local BLE debug binary at [`debug/hardware_ble.rs`](/Users/vvx/projekt/rs/iqos/debug/hardware_ble.rs).
+The repository includes a local BLE debug binary at [`debug/hardware_ble.rs`](debug/hardware_ble.rs).
 
 Basic run:
 
